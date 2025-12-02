@@ -1,0 +1,74 @@
+name: Blinkit HOT Scheduler
+
+on:
+  # Run every 3 hours
+  schedule:
+    - cron: '0 */3 * * *'  # At minute 0 past every 3rd hour
+  
+  # Allow manual triggering from GitHub UI
+  workflow_dispatch:
+
+jobs:
+  run-blinkit-workflow:
+    runs-on: ubuntu-latest
+    
+    steps:
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      # 2. Set up Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      # 3. Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements_v2.txt
+      
+      # 4. Decode and restore credentials (different secrets for Blinkit)
+      - name: Restore Google credentials
+        env:
+          BLINKIT_GOOGLE_CREDENTIALS: ${{ secrets.BLINKIT_GOOGLE_CREDENTIALS }}
+          BLINKIT_GOOGLE_TOKEN: ${{ secrets.BLINKIT_GOOGLE_TOKEN }}
+        run: |
+          echo "$BLINKIT_GOOGLE_CREDENTIALS" | base64 -d > credentials.json
+          echo "$BLINKIT_GOOGLE_TOKEN" | base64 -d > token.json
+          echo "✅ Blinkit credentials restored"
+      
+      # 5. Run the Blinkit workflow once
+      - name: Run Blinkit HOT workflow
+        run: |
+          echo "🚀 Starting Blinkit HOT workflow..."
+          python appv2.py --run-once
+          echo "✅ Blinkit workflow completed"
+      
+      # 6. Update token if refreshed (optional)
+      - name: Check if token was updated
+        id: check_token
+        run: |
+          if [ -f token.json ]; then
+            echo "token_updated=true" >> $GITHUB_OUTPUT
+          else
+            echo "token_updated=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # 7. Cleanup
+      - name: Cleanup credentials
+        if: always()
+        run: |
+          rm -f credentials.json token.json blinkit_hot_scheduler.log
+          echo "🧹 Cleaned up temporary files"
+      
+      # 8. Upload logs as artifact
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: blinkit-logs-${{ github.run_number }}
+          path: blinkit_hot_scheduler.log
+          retention-days: 30
