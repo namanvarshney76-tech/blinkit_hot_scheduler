@@ -52,6 +52,34 @@ class BlinkitHOTScheduler:
         
         self.logs: List[Dict] = []
         
+        # Statistics for summary
+        self.stats = {
+            'gmail': {
+                'emails_found': 0,
+                'emails_processed': 0,
+                'emails_skipped': 0,
+                'attachments_found': 0,
+                'attachments_uploaded': 0,
+                'attachments_skipped': 0,
+                'attachments_filtered': 0,
+                'start_time': None,
+                'end_time': None
+            },
+            'excel': {
+                'files_found': 0,
+                'files_processed': 0,
+                'files_skipped': 0,
+                'files_filtered': 0,
+                'rows_added': 0,
+                'start_time': None,
+                'end_time': None
+            },
+            'overall': {
+                'start_time': None,
+                'end_time': None
+            }
+        }
+        
         # Configuration
         self.gmail_config = {
             'sender': 'purchaseorder@handsontrades.com',
@@ -81,7 +109,93 @@ class BlinkitHOTScheduler:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = {"timestamp": timestamp, "level": level.upper(), "message": message}
         self.logs.append(log_entry)
-        logging.info(f"[{level}] {message}")
+        
+        # Format log message without timestamp for console (timestamp will be added by logging)
+        log_message = message
+        if message.startswith("[") and "] " in message:
+            # Extract just the message part after the bracket
+            log_message = message.split("] ", 1)[1] if "] " in message else message
+        
+        if level.upper() == "ERROR":
+            logging.error(log_message)
+        elif level.upper() == "WARNING":
+            logging.warning(log_message)
+        elif level.upper() == "SUCCESS":
+            logging.info(f"✓ {log_message}")
+        else:
+            logging.info(log_message)
+    
+    def print_summary(self, workflow_type: str):
+        """Print detailed summary for a workflow"""
+        print("\n" + "=" * 80)
+        print(f"{workflow_type.upper()} WORKFLOW SUMMARY")
+        print("=" * 80)
+        
+        if workflow_type == 'gmail':
+            stats = self.stats['gmail']
+            duration = (stats['end_time'] - stats['start_time']).total_seconds() if stats['end_time'] and stats['start_time'] else 0
+            
+            print(f"📧 Emails Found: {stats['emails_found']}")
+            print(f"   • Processed: {stats['emails_processed']}")
+            print(f"   • Skipped: {stats['emails_skipped']}")
+            print(f"")
+            print(f"📎 Attachments Found: {stats['attachments_found']}")
+            print(f"   • Uploaded to Drive: {stats['attachments_uploaded']}")
+            print(f"   • Skipped (already exist): {stats['attachments_skipped']}")
+            print(f"   • Filtered (non-Excel): {stats['attachments_filtered']}")
+            print(f"")
+            print(f"⏱️  Duration: {duration:.2f} seconds")
+            
+        elif workflow_type == 'excel':
+            stats = self.stats['excel']
+            duration = (stats['end_time'] - stats['start_time']).total_seconds() if stats['end_time'] and stats['start_time'] else 0
+            
+            print(f"📁 Excel Files Found: {stats['files_found']}")
+            print(f"   • Processed: {stats['files_processed']}")
+            print(f"   • Skipped (already in sheet): {stats['files_skipped']}")
+            print(f"   • Filtered (other types): {stats['files_filtered']}")
+            print(f"")
+            print(f"📊 Data Rows Added: {stats['rows_added']}")
+            print(f"")
+            print(f"⏱️  Duration: {duration:.2f} seconds")
+        
+        print("=" * 80)
+    
+    def print_overall_summary(self):
+        """Print overall summary of complete workflow"""
+        print("\n" + "=" * 80)
+        print("OVERALL WORKFLOW SUMMARY")
+        print("=" * 80)
+        
+        gmail_stats = self.stats['gmail']
+        excel_stats = self.stats['excel']
+        overall_duration = (self.stats['overall']['end_time'] - self.stats['overall']['start_time']).total_seconds()
+        
+        print(f"📊 GMAIL TO DRIVE:")
+        print(f"   • Emails Processed: {gmail_stats['emails_processed']}/{gmail_stats['emails_found']}")
+        print(f"   • Attachments Uploaded: {gmail_stats['attachments_uploaded']}")
+        
+        print(f"")
+        print(f"📊 DRIVE TO SHEET:")
+        print(f"   • Files Processed: {excel_stats['files_processed']}/{excel_stats['files_found']}")
+        print(f"   • Rows Added: {excel_stats['rows_added']}")
+        
+        print(f"")
+        print(f"⏱️  Total Duration: {overall_duration:.2f} seconds")
+        
+        success_rate = (gmail_stats['emails_processed'] + excel_stats['files_processed']) / max(1, gmail_stats['emails_found'] + excel_stats['files_found'])
+        
+        if success_rate > 0.8:
+            status = "✅ SUCCESS"
+        elif success_rate > 0.5:
+            status = "⚠️  PARTIAL SUCCESS"
+        else:
+            status = "❌ FAILED"
+        
+        print(f"")
+        print(f"📈 Success Rate: {success_rate:.1%}")
+        print(f"📋 Status: {status}")
+        print("=" * 80)
     
     def authenticate(self):
         """Authenticate using local credentials file"""
@@ -112,7 +226,7 @@ class BlinkitHOTScheduler:
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.sheets_service = build('sheets', 'v4', credentials=creds)
             
-            self.log("Authentication successful!", "INFO")
+            self.log("Authentication successful!", "SUCCESS")
             return True
             
         except Exception as e:
@@ -141,30 +255,31 @@ class BlinkitHOTScheduler:
             query_parts.append(f"after:{start_date.strftime('%Y/%m/%d')}")
             
             query = " ".join(query_parts)
-            self.log(f"Searching Gmail with query: {query}", "INFO")
+            self.log(f"[GMAIL] Searching with query: {query}", "INFO")
             
             result = self.gmail_service.users().messages().list(
                 userId='me', q=query, maxResults=max_results
             ).execute()
             
             messages = result.get('messages', [])
-            self.log(f"Gmail search returned {len(messages)} messages", "INFO")
+            self.log(f"[GMAIL] Found {len(messages)} emails", "INFO")
             
             return messages
             
         except Exception as e:
-            self.log(f"Email search failed: {str(e)}", "ERROR")
+            self.log(f"[GMAIL] Email search failed: {str(e)}", "ERROR")
             return []
     
     def process_gmail_workflow(self) -> Dict[str, Any]:
         """Process Gmail attachment download workflow"""
-        workflow_start = datetime.now()
-        emails_checked = 0
-        attachments_saved = 0
+        self.stats['gmail']['start_time'] = datetime.now()
         
         try:
-            self.log("Starting Gmail workflow...", "INFO")
+            self.log("=" * 80, "INFO")
+            self.log("Starting Gmail to Drive workflow...", "INFO")
+            self.log("=" * 80, "INFO")
             
+            # Search for emails
             emails = self.search_emails(
                 sender=self.gmail_config['sender'],
                 search_term=self.gmail_config['search_term'],
@@ -172,45 +287,46 @@ class BlinkitHOTScheduler:
                 max_results=self.gmail_config['max_results']
             )
             
-            emails_checked = len(emails)
+            self.stats['gmail']['emails_found'] = len(emails)
+            self.log(f"📧 Found {len(emails)} emails matching criteria", "INFO")
             
             if not emails:
                 self.log("No emails found matching criteria", "WARNING")
+                self.stats['gmail']['end_time'] = datetime.now()
                 return {
                     'success': True, 
                     'processed': 0,
                     'emails_checked': 0,
                     'attachments_saved': 0,
-                    'start_time': workflow_start,
-                    'end_time': datetime.now()
+                    'start_time': self.stats['gmail']['start_time'],
+                    'end_time': self.stats['gmail']['end_time']
                 }
-            
-            self.log(f"Found {len(emails)} emails matching criteria", "INFO")
             
             base_folder_name = "Gmail_Attachments"
             base_folder_id = self._create_drive_folder(base_folder_name, self.gmail_config.get('gdrive_folder_id'))
             
             if not base_folder_id:
                 self.log("Failed to create base folder in Google Drive", "ERROR")
+                self.stats['gmail']['end_time'] = datetime.now()
                 return {
                     'success': False, 
                     'processed': 0,
-                    'emails_checked': emails_checked,
+                    'emails_checked': self.stats['gmail']['emails_found'],
                     'attachments_saved': 0,
-                    'start_time': workflow_start,
-                    'end_time': datetime.now()
+                    'start_time': self.stats['gmail']['start_time'],
+                    'end_time': self.stats['gmail']['end_time']
                 }
             
-            processed_count = 0
-            total_attachments = 0
+            processed_emails = 0
+            skipped_emails = 0
             
-            for i, email in enumerate(emails):
+            for i, email in enumerate(emails, 1):
                 try:
                     email_details = self._get_email_details(email['id'])
                     subject = email_details.get('subject', 'No Subject')[:50]
                     sender = email_details.get('sender', 'Unknown')
                     
-                    self.log(f"Processing email: {subject} from {sender}", "INFO")
+                    self.log(f"📨 Processing email {i}/{len(emails)}: {subject}", "INFO")
                     
                     message = self.gmail_service.users().messages().get(
                         userId='me', id=email['id'], format='full'
@@ -218,102 +334,166 @@ class BlinkitHOTScheduler:
                     
                     if not message or not message.get('payload'):
                         self.log(f"No payload found for email: {subject}", "WARNING")
+                        skipped_emails += 1
                         continue
                     
-                    attachment_count = self._extract_attachments_from_email(
+                    # Extract attachments with detailed stats
+                    attachment_stats = self._extract_attachments_from_email(
                         email['id'], message['payload'], sender, self.gmail_config, base_folder_id
                     )
                     
-                    total_attachments += attachment_count
-                    if attachment_count > 0:
-                        processed_count += 1
-                        self.log(f"Found {attachment_count} attachments in: {subject}", "SUCCESS")
+                    uploaded = attachment_stats.get('uploaded', 0)
+                    skipped = attachment_stats.get('skipped', 0)
+                    filtered = attachment_stats.get('filtered', 0)
+                    
+                    self.stats['gmail']['attachments_uploaded'] += uploaded
+                    self.stats['gmail']['attachments_skipped'] += skipped
+                    self.stats['gmail']['attachments_filtered'] += filtered
+                    self.stats['gmail']['attachments_found'] += (uploaded + skipped + filtered)
+                    
+                    if uploaded > 0:
+                        processed_emails += 1
+                        self.log(f"✓ Found {uploaded} attachments in: {subject}", "SUCCESS")
+                        if skipped > 0:
+                            self.log(f"  (Skipped {skipped} existing attachments)", "INFO")
+                        if filtered > 0:
+                            self.log(f"  (Filtered {filtered} non-Excel files)", "INFO")
+                    else:
+                        skipped_emails += 1
+                        if skipped > 0:
+                            self.log(f"⚠️ All attachments already exist for: {subject}", "WARNING")
+                        elif filtered > 0:
+                            self.log(f"⚠️ No Excel attachments found for: {subject}", "WARNING")
+                        else:
+                            self.log(f"⚠️ No attachments found for: {subject}", "WARNING")
                     
                 except Exception as e:
-                    self.log(f"Failed to process email {email.get('id', 'unknown')}: {str(e)}", "ERROR")
+                    self.log(f"❌ Failed to process email {email.get('id', 'unknown')}: {str(e)}", "ERROR")
+                    skipped_emails += 1
             
-            attachments_saved = total_attachments
-            self.log(f"Gmail workflow completed! Processed {total_attachments} attachments from {processed_count} emails", "INFO")
+            self.stats['gmail']['emails_processed'] = processed_emails
+            self.stats['gmail']['emails_skipped'] = skipped_emails
+            self.stats['gmail']['end_time'] = datetime.now()
+            
+            # Print detailed summary
+            self.print_summary('gmail')
             
             return {
                 'success': True, 
-                'processed': total_attachments,
-                'emails_checked': emails_checked,
-                'attachments_saved': attachments_saved,
-                'start_time': workflow_start,
-                'end_time': datetime.now()
+                'processed': self.stats['gmail']['attachments_uploaded'],
+                'emails_checked': self.stats['gmail']['emails_found'],
+                'attachments_saved': self.stats['gmail']['attachments_uploaded'],
+                'start_time': self.stats['gmail']['start_time'],
+                'end_time': self.stats['gmail']['end_time']
             }
             
         except Exception as e:
-            self.log(f"Gmail workflow failed: {str(e)}", "ERROR")
+            self.log(f"❌ Gmail workflow failed: {str(e)}", "ERROR")
+            self.stats['gmail']['end_time'] = datetime.now()
+            self.print_summary('gmail')
             return {
                 'success': False, 
                 'processed': 0,
-                'emails_checked': emails_checked,
-                'attachments_saved': attachments_saved,
-                'start_time': workflow_start,
-                'end_time': datetime.now()
+                'emails_checked': self.stats['gmail']['emails_found'],
+                'attachments_saved': self.stats['gmail']['attachments_uploaded'],
+                'start_time': self.stats['gmail']['start_time'],
+                'end_time': self.stats['gmail']['end_time']
             }
     
     def process_excel_workflow(self) -> Dict[str, Any]:
         """Process Excel GRN workflow with source file tracking"""
-        workflow_start = datetime.now()
-        files_processed = 0
-        new_files_count = 0
+        self.stats['excel']['start_time'] = datetime.now()
         
         try:
-            self.log("Starting Excel GRN workflow with source file tracking...", "INFO")
+            self.log("=" * 80, "INFO")
+            self.log("Starting Drive to Sheet workflow...", "INFO")
+            self.log("=" * 80, "INFO")
             
-            all_excel_files = self._get_excel_files_with_grn(
+            # Step 1: Get total Excel files with 'GRN' in name from Drive folder
+            all_files = self._get_files_in_folder(
                 self.excel_config['excel_folder_id'], 
                 self.excel_config['days_back'], 
                 self.excel_config['max_results']
             )
             
-            if not all_excel_files:
-                self.log("No Excel files with 'GRN' found in the specified folder", "WARNING")
+            # Filter for Excel files with 'GRN' in name
+            excel_files = []
+            other_files = []
+            
+            for file in all_files:
+                if (file['mimeType'] in ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 
+                                         'application/vnd.ms-excel'] and 
+                    'GRN' in file['name'].upper()):
+                    excel_files.append(file)
+                else:
+                    other_files.append(file)
+            
+            self.stats['excel']['files_found'] = len(excel_files)
+            self.stats['excel']['files_filtered'] = len(other_files)
+            
+            self.log(f"📁 Found {len(excel_files)} Excel files with 'GRN' in name", "INFO")
+            if other_files:
+                self.log(f"   (Filtered {len(other_files)} other files)", "INFO")
+            
+            if not excel_files:
+                self.log("No Excel files with 'GRN' found", "WARNING")
+                self.stats['excel']['end_time'] = datetime.now()
+                self.print_summary('excel')
                 return {
                     'success': True, 
                     'processed': 0,
                     'files_processed': 0,
                     'new_files_count': 0,
                     'total_files_found': 0,
-                    'start_time': workflow_start,
-                    'end_time': datetime.now()
+                    'start_time': self.stats['excel']['start_time'],
+                    'end_time': self.stats['excel']['end_time']
                 }
             
-            self.log(f"Found {len(all_excel_files)} Excel files containing 'GRN' in total", "INFO")
-            
+            # Step 2: Get existing source files from Google Sheet
             existing_source_files = self._get_existing_source_files(
                 self.excel_config['spreadsheet_id'], 
                 self.excel_config['sheet_name'],
                 self.excel_config['source_file_column']
             )
             
-            self.log(f"Found {len(existing_source_files)} existing source files in the sheet", "INFO")
+            self.log(f"📋 Found {len(existing_source_files)} existing files in sheet", "INFO")
             
+            # Step 3: Filter out files that are already in the sheet
             new_excel_files = []
-            for file in all_excel_files:
+            skipped_excel_files = []
+            
+            for file in excel_files:
                 if file['name'] not in existing_source_files:
                     new_excel_files.append(file)
                 else:
-                    self.log(f"Skipping already processed file: {file['name']}", "INFO")
+                    skipped_excel_files.append(file)
             
-            new_files_count = len(new_excel_files)
-            self.log(f"Found {new_files_count} new files to process", "INFO")
+            self.stats['excel']['files_skipped'] = len(skipped_excel_files)
+            
+            self.log(f"📊 Files to process: {len(new_excel_files)} new, {len(skipped_excel_files)} already in sheet", "INFO")
+            
+            if skipped_excel_files:
+                self.log(f"📋 Skipped files:", "INFO")
+                for file in skipped_excel_files[:5]:  # Show first 5
+                    self.log(f"   • {file['name']}", "INFO")
+                if len(skipped_excel_files) > 5:
+                    self.log(f"   ... and {len(skipped_excel_files) - 5} more", "INFO")
             
             if not new_excel_files:
                 self.log("All files already processed in previous runs", "INFO")
+                self.stats['excel']['end_time'] = datetime.now()
+                self.print_summary('excel')
                 return {
                     'success': True, 
                     'processed': 0,
                     'files_processed': 0,
                     'new_files_count': 0,
-                    'total_files_found': len(all_excel_files),
-                    'start_time': workflow_start,
-                    'end_time': datetime.now()
+                    'total_files_found': len(excel_files),
+                    'start_time': self.stats['excel']['start_time'],
+                    'end_time': self.stats['excel']['end_time']
                 }
             
+            # Step 4: Process new files
             processed_count = 0
             sheet_has_data = self._check_sheet_has_data(
                 self.excel_config['spreadsheet_id'], 
@@ -322,19 +502,24 @@ class BlinkitHOTScheduler:
             
             is_first_file = True
             
-            for i, file in enumerate(new_excel_files):
+            for i, file in enumerate(new_excel_files, 1):
                 try:
+                    self.log(f"🔄 Processing file {i}/{len(new_excel_files)}: {file['name']}", "INFO")
+                    
+                    # Read Excel file
                     df = self._read_excel_file(file['id'], file['name'], self.excel_config['header_row'])
                     
                     if df.empty:
-                        self.log(f"No data extracted from: {file['name']}", "WARNING")
+                        self.log(f"⚠️ No data extracted from: {file['name']}", "WARNING")
                         continue
                     
+                    # Add source file column to DataFrame
                     df[self.excel_config['source_file_column']] = file['name']
                     
-                    self.log(f"Data shape: {df.shape} - Columns: {list(df.columns)[:3]}{'...' if len(df.columns) > 3 else ''}", "INFO")
+                    self.log(f"📈 Data shape: {df.shape} rows × {df.shape[1]} columns", "INFO")
                     
-                    self._append_to_sheet_with_source(
+                    # Append to Google Sheet
+                    rows_added = self._append_to_sheet_with_source(
                         self.excel_config['spreadsheet_id'], 
                         self.excel_config['sheet_name'], 
                         df, 
@@ -342,59 +527,80 @@ class BlinkitHOTScheduler:
                         is_first_file and not sheet_has_data
                     )
                     
-                    self.log(f"Appended data from: {file['name']}", "SUCCESS")
-                    processed_count += 1
-                    is_first_file = False
+                    if rows_added > 0:
+                        self.log(f"✅ Appended {rows_added} rows from: {file['name']}", "SUCCESS")
+                        self.stats['excel']['rows_added'] += rows_added
+                        processed_count += 1
+                        is_first_file = False
+                    else:
+                        self.log(f"⚠️ No rows added from: {file['name']}", "WARNING")
                     
                 except Exception as e:
-                    self.log(f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}", "ERROR")
+                    self.log(f"❌ Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}", "ERROR")
             
-            files_processed = processed_count
+            self.stats['excel']['files_processed'] = processed_count
+            self.stats['excel']['end_time'] = datetime.now()
             
-            self.log(f"Excel workflow completed! Processed {processed_count} new files", "INFO")
+            # Print detailed summary
+            self.print_summary('excel')
             
             return {
                 'success': True, 
                 'processed': processed_count,
-                'files_processed': files_processed,
-                'new_files_count': new_files_count,
-                'total_files_found': len(all_excel_files),
-                'start_time': workflow_start,
-                'end_time': datetime.now()
+                'files_processed': processed_count,
+                'new_files_count': len(new_excel_files),
+                'total_files_found': len(excel_files),
+                'start_time': self.stats['excel']['start_time'],
+                'end_time': self.stats['excel']['end_time']
             }
             
         except Exception as e:
-            self.log(f"Excel workflow failed: {str(e)}", "ERROR")
+            self.log(f"❌ Excel workflow failed: {str(e)}", "ERROR")
+            self.stats['excel']['end_time'] = datetime.now()
+            self.print_summary('excel')
             return {
                 'success': False, 
                 'processed': 0,
-                'files_processed': files_processed,
-                'new_files_count': new_files_count,
-                'total_files_found': 0,
-                'start_time': workflow_start,
-                'end_time': datetime.now()
+                'files_processed': self.stats['excel']['files_processed'],
+                'new_files_count': 0,
+                'total_files_found': self.stats['excel']['files_found'],
+                'start_time': self.stats['excel']['start_time'],
+                'end_time': self.stats['excel']['end_time']
             }
     
     def run_workflow(self):
         """Run complete workflow: Gmail → Excel with Source File Tracking → Log Summary"""
         try:
-            self.log("=== Starting Blinkit HOT Workflow ===", "INFO")
+            self.stats['overall']['start_time'] = datetime.now()
             
-            overall_start = datetime.now()
+            self.log("\n" + "=" * 80, "INFO")
+            self.log("🚀 STARTING COMPLETE BLINKIT HOT WORKFLOW", "INFO")
+            self.log("=" * 80, "INFO")
             
+            # Step 1: Run Gmail workflow
             gmail_result = self.process_gmail_workflow()
+            
+            # Small delay between workflows
+            time.sleep(2)
+            
+            # Step 2: Run Excel workflow with source file tracking
             excel_result = self.process_excel_workflow()
             
-            overall_end = datetime.now()
+            self.stats['overall']['end_time'] = datetime.now()
             
+            # Step 3: Log summary to sheet
             summary_data = {
-                'workflow_start': overall_start,
-                'workflow_end': overall_end,
-                'emails_checked': gmail_result.get('emails_checked', 0),
-                'attachments_saved': gmail_result.get('attachments_saved', 0),
-                'total_files_found': excel_result.get('total_files_found', 0),
-                'new_files_processed': excel_result.get('new_files_count', 0),
-                'files_processed': excel_result.get('files_processed', 0),
+                'workflow_start': self.stats['overall']['start_time'],
+                'workflow_end': self.stats['overall']['end_time'],
+                'emails_checked': self.stats['gmail']['emails_found'],
+                'attachments_uploaded': self.stats['gmail']['attachments_uploaded'],
+                'attachments_skipped': self.stats['gmail']['attachments_skipped'],
+                'attachments_filtered': self.stats['gmail']['attachments_filtered'],
+                'total_files_found': self.stats['excel']['files_found'],
+                'files_processed': self.stats['excel']['files_processed'],
+                'files_skipped': self.stats['excel']['files_skipped'],
+                'files_filtered': self.stats['excel']['files_filtered'],
+                'rows_added': self.stats['excel']['rows_added'],
                 'gmail_success': gmail_result.get('success', False),
                 'excel_success': excel_result.get('success', False),
                 'overall_success': gmail_result.get('success', False) and excel_result.get('success', False)
@@ -402,20 +608,35 @@ class BlinkitHOTScheduler:
             
             self._log_summary_to_sheet(summary_data)
             
-            duration = (overall_end - overall_start).total_seconds() / 60
-            self.log(f"=== Workflow Finished ===", "INFO")
-            self.log(f"Duration: {duration:.2f} minutes", "INFO")
-            self.log(f"Emails checked: {summary_data['emails_checked']}", "INFO")
-            self.log(f"Attachments saved: {summary_data['attachments_saved']}", "INFO")
-            self.log(f"Total Excel files found: {summary_data['total_files_found']}", "INFO")
-            self.log(f"New files processed: {summary_data['new_files_processed']}", "INFO")
-            self.log(f"Files processed: {summary_data['files_processed']}", "INFO")
+            # Print overall summary
+            self.print_overall_summary()
             
             return summary_data['overall_success']
             
         except Exception as e:
-            self.log(f"Complete workflow failed: {str(e)}", "ERROR")
+            self.log(f"❌ Complete workflow failed: {str(e)}", "ERROR")
+            self.stats['overall']['end_time'] = datetime.now()
+            self.print_overall_summary()
             return False
+    
+    def _get_files_in_folder(self, folder_id: str, days_back: int, max_results: int) -> List[Dict]:
+        """Get all files from Drive folder"""
+        try:
+            start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%dT00:00:00')
+            query = f"'{folder_id}' in parents and trashed=false and modifiedTime > '{start_date}'"
+            results = self.drive_service.files().list(
+                q=query,
+                pageSize=max_results,
+                fields="files(id, name, mimeType)",
+                orderBy="modifiedTime desc"
+            ).execute()
+            
+            files = results.get('files', [])
+            return files
+            
+        except Exception as e:
+            self.log(f"Failed to get files from folder: {str(e)}", "ERROR")
+            return []
     
     def _get_existing_source_files(self, spreadsheet_id: str, sheet_name: str, source_file_column: str) -> List[str]:
         """Get list of existing source files from Google Sheet"""
@@ -469,8 +690,8 @@ class BlinkitHOTScheduler:
             return False
     
     def _append_to_sheet_with_source(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, 
-                                    source_file_column: str, include_headers: bool):
-        """Append DataFrame to Google Sheet with source file column"""
+                                    source_file_column: str, include_headers: bool) -> int:
+        """Append DataFrame to Google Sheet with source file column, returns number of rows added"""
         try:
             columns = [col for col in df.columns if col != source_file_column] + [source_file_column]
             df = df[columns]
@@ -482,7 +703,7 @@ class BlinkitHOTScheduler:
             
             if not values:
                 self.log("No data to append", "WARNING")
-                return
+                return 0
             
             body = {'values': values}
             
@@ -494,10 +715,12 @@ class BlinkitHOTScheduler:
                 body=body
             ).execute()
             
-            self.log(f"Appended {len(values)} rows to Google Sheet", "INFO")
+            rows_added = len(values) if not include_headers else len(values) - 1
+            return rows_added
             
         except Exception as e:
             self.log(f"Failed to append to Google Sheet: {str(e)}", "ERROR")
+            return 0
 
     def _log_summary_to_sheet(self, summary_data: Dict):
         """Log workflow summary to Google Sheet"""
@@ -506,10 +729,14 @@ class BlinkitHOTScheduler:
                 summary_data['workflow_start'].strftime("%Y-%m-%d %H:%M:%S"),
                 summary_data['workflow_end'].strftime("%Y-%m-%d %H:%M:%S"),
                 summary_data['emails_checked'],
-                summary_data['attachments_saved'],
+                summary_data['attachments_uploaded'],
+                summary_data['attachments_skipped'],
+                summary_data['attachments_filtered'],
                 summary_data['total_files_found'],
-                summary_data['new_files_processed'],
                 summary_data['files_processed'],
+                summary_data['files_skipped'],
+                summary_data['files_filtered'],
+                summary_data['rows_added'],
                 "SUCCESS" if summary_data['gmail_success'] else "FAILED",
                 "SUCCESS" if summary_data['excel_success'] else "FAILED",
                 "SUCCESS" if summary_data['overall_success'] else "FAILED"
@@ -526,8 +753,9 @@ class BlinkitHOTScheduler:
                 if not values:
                     headers = [
                         "Workflow Start", "Workflow End", "Emails Checked", 
-                        "Attachments Saved", "Total Files Found", "New Files Processed",
-                        "Files Processed", "Gmail Status", "Excel Status", "Overall Status"
+                        "Attachments Uploaded", "Attachments Skipped", "Attachments Filtered",
+                        "Total Files Found", "Files Processed", "Files Skipped", "Files Filtered",
+                        "Rows Added", "Gmail Status", "Excel Status", "Overall Status"
                     ]
                     body = {'values': [headers, summary_row]}
                     self.sheets_service.spreadsheets().values().update(
@@ -546,14 +774,15 @@ class BlinkitHOTScheduler:
                         body=body
                     ).execute()
                 
-                self.log("Workflow summary logged to Google Sheet", "INFO")
+                self.log("Workflow summary logged to Google Sheet", "SUCCESS")
                 
             except HttpError as e:
                 if "Unable to parse range" in str(e):
                     headers = [
                         "Workflow Start", "Workflow End", "Emails Checked", 
-                        "Attachments Saved", "Total Files Found", "New Files Processed",
-                        "Files Processed", "Gmail Status", "Excel Status", "Overall Status"
+                        "Attachments Uploaded", "Attachments Skipped", "Attachments Filtered",
+                        "Total Files Found", "Files Processed", "Files Skipped", "Files Filtered",
+                        "Rows Added", "Gmail Status", "Excel Status", "Overall Status"
                     ]
                     body = {'values': [headers, summary_row]}
                     self.sheets_service.spreadsheets().values().update(
@@ -562,7 +791,7 @@ class BlinkitHOTScheduler:
                         valueInputOption='USER_ENTERED',
                         body=body
                     ).execute()
-                    self.log("Created summary sheet and logged workflow data", "INFO")
+                    self.log("Created summary sheet and logged workflow data", "SUCCESS")
                 else:
                     raise e
                     
@@ -647,20 +876,25 @@ class BlinkitHOTScheduler:
             self.log(f"Failed to check file existence: {str(e)}", "ERROR")
             return False
     
-    def _extract_attachments_from_email(self, message_id: str, payload: Dict, sender: str, config: dict, base_folder_id: str) -> int:
-        """Extract attachments from email with proper folder structure"""
-        processed_count = 0
+    def _extract_attachments_from_email(self, message_id: str, payload: Dict, sender: str, config: dict, base_folder_id: str) -> Dict[str, int]:
+        """Extract attachments from email with proper folder structure, returns statistics"""
+        stats = {'uploaded': 0, 'skipped': 0, 'filtered': 0}
         
         if "parts" in payload:
             for part in payload["parts"]:
-                processed_count += self._extract_attachments_from_email(
+                part_stats = self._extract_attachments_from_email(
                     message_id, part, sender, config, base_folder_id
                 )
+                stats['uploaded'] += part_stats['uploaded']
+                stats['skipped'] += part_stats['skipped']
+                stats['filtered'] += part_stats['filtered']
         elif payload.get("filename") and "attachmentId" in payload.get("body", {}):
             filename = payload.get("filename", "")
             
+            # Filter for Excel files only
             if not filename.lower().endswith(('.xls', '.xlsx', '.xlsm')):
-                return 0
+                stats['filtered'] += 1
+                return stats
             
             try:
                 attachment_id = payload["body"].get("attachmentId")
@@ -702,31 +936,14 @@ class BlinkitHOTScheduler:
                         fields='id'
                     ).execute()
                     
-                    processed_count += 1
+                    stats['uploaded'] += 1
+                else:
+                    stats['skipped'] += 1
                     
             except Exception as e:
                 self.log(f"Failed to process attachment {filename}: {str(e)}", "ERROR")
         
-        return processed_count
-    
-    def _get_excel_files_with_grn(self, folder_id: str, days_back: int, max_results: int) -> List[Dict]:
-        """Get Excel files containing 'GRN' in name from Drive folder"""
-        try:
-            start_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%dT00:00:00')
-            query = f"'{folder_id}' in parents and (mimeType='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' or mimeType='application/vnd.ms-excel') and name contains 'GRN' and trashed=false and modifiedTime > '{start_date}'"
-            results = self.drive_service.files().list(
-                q=query,
-                pageSize=max_results,
-                fields="files(id, name, mimeType)",
-                orderBy="modifiedTime desc"
-            ).execute()
-            
-            files = results.get('files', [])
-            return files
-            
-        except Exception as e:
-            self.log(f"Failed to get Excel files: {str(e)}", "ERROR")
-            return []
+        return stats
     
     def _read_excel_file(self, file_id: str, filename: str, header_row: int) -> pd.DataFrame:
         """Read Excel file from Drive with robust parsing"""
@@ -742,9 +959,9 @@ class BlinkitHOTScheduler:
             
             try:
                 if header_row == -1:
-                    df = pd.read_excel(file_stream, header=None)
+                    df = pd.read_excel(file_stream, header=None, engine='openpyxl')
                 else:
-                    df = pd.read_excel(file_stream, header=header_row)
+                    df = pd.read_excel(file_stream, header=header_row, engine='openpyxl')
                 return self._clean_dataframe(df)
             except Exception as e:
                 self.log(f"Standard read failed: {str(e)[:50]}...", "WARNING")
@@ -804,8 +1021,6 @@ class BlinkitHOTScheduler:
         if df.empty:
             return df
         
-        self.log(f"Original DataFrame shape: {df.shape}", "INFO")
-        
         string_columns = df.select_dtypes(include=['object']).columns
         for col in string_columns:
             df[col] = df[col].astype(str).str.replace("'", "", regex=False)
@@ -818,7 +1033,6 @@ class BlinkitHOTScheduler:
                 (df[second_col].astype(str).str.strip() == "nan")
             )
             df = df[mask]
-            self.log(f"After removing blank B column rows: {df.shape}", "INFO")
         
         original_count = len(df)
         df = df.drop_duplicates()
@@ -827,40 +1041,41 @@ class BlinkitHOTScheduler:
         if duplicates_removed > 0:
             self.log(f"Removed {duplicates_removed} duplicate rows", "INFO")
         
-        self.log(f"Final cleaned DataFrame shape: {df.shape}", "INFO")
         return df
 
 
 def main():
     """Main function to run the complete workflow once"""
     print("=" * 80)
-    print("BLINKIT HOT AUTOMATION WORKFLOW")
+    print("🚀 BLINKIT HOT AUTOMATION WORKFLOW")
     print("=" * 80)
     
     automation = BlinkitHOTScheduler()
     
-    print("\nAuthenticating...")
+    print("\n🔐 Authenticating...")
     if not automation.authenticate():
-        print("ERROR: Authentication failed. Please check credentials.")
+        print("❌ ERROR: Authentication failed. Please check credentials.")
         return 1
     
-    print("Authentication successful!")
+    print("✅ Authentication successful!")
     
-    print("\nRunning complete workflow...")
+    print("\n🔄 Running complete workflow...")
     try:
         success = automation.run_workflow()
         
-        print("\n" + "=" * 80)
         if success:
-            print("✓ WORKFLOW COMPLETED SUCCESSFULLY")
+            print("\n" + "=" * 80)
+            print("✅ WORKFLOW COMPLETED SUCCESSFULLY")
+            print("=" * 80)
         else:
-            print("✗ WORKFLOW COMPLETED WITH ERRORS")
-        print("=" * 80)
+            print("\n" + "=" * 80)
+            print("⚠️  WORKFLOW COMPLETED WITH ERRORS")
+            print("=" * 80)
         
         return 0 if success else 1
         
     except Exception as e:
-        print(f"\n✗ WORKFLOW FAILED: {str(e)}")
+        print(f"\n❌ WORKFLOW FAILED: {str(e)}")
         return 1
 
 
