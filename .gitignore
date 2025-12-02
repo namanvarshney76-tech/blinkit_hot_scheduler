@@ -4,8 +4,7 @@ token.json
 
 # Logs
 *.log
-blinkit_hot_scheduler.log
-instamart_scheduler.log
+blinkit_scheduler.log
 
 # Python
 __pycache__/
