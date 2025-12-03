@@ -93,52 +93,98 @@ class BlinkitHOTScheduler:
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         log_entry = {"timestamp": timestamp, "level": level.upper(), "message": message}
         self.logs.append(log_entry)
-        logging.info(f"[{level}] {message}")
+        
+        # Different formatting for different levels
+        if level.upper() == "ERROR":
+            logging.error(message)
+        elif level.upper() == "WARNING":
+            logging.warning(message)
+        elif level.upper() == "SUCCESS":
+            logging.info(f"✅ {message}")
+        else:
+            logging.info(message)
     
     def authenticate(self):
-        """Authenticate using pre-existing token file (optimized for GitHub Actions)"""
+        """Authenticate using pre-existing token file with proper refresh handling"""
         try:
             self.log("Authenticating with Google APIs for GitHub Actions...", "INFO")
             
             # Load credentials from token file if exists
             creds = None
             token_file = 'token.json'
+            creds_file = 'credentials.json'
             
             if os.path.exists(token_file):
                 self.log(f"Found token file at {token_file}", "INFO")
                 try:
+                    # Read token file to check its content
+                    with open(token_file, 'r') as f:
+                        token_content = f.read()
+                        self.log(f"Token file size: {len(token_content)} bytes", "INFO")
+                    
                     creds = Credentials.from_authorized_user_file(token_file, 
                         list(set(self.gmail_scopes + self.drive_scopes + self.sheets_scopes)))
-                    self.log("Token loaded successfully", "INFO")
+                    
+                    # Check if token is expired
+                    if creds.expired:
+                        self.log(f"Token expired at {creds.expiry}", "WARNING")
+                        if creds.refresh_token:
+                            self.log("Token has refresh token, attempting to refresh...", "INFO")
+                            try:
+                                creds.refresh(Request())
+                                self.log("Token refreshed successfully!", "SUCCESS")
+                                
+                                # Save refreshed token
+                                with open(token_file, 'w') as token:
+                                    token.write(creds.to_json())
+                                self.log("Refreshed token saved to file", "INFO")
+                            except Exception as refresh_error:
+                                self.log(f"Failed to refresh token: {str(refresh_error)}", "ERROR")
+                                
+                                # Try to get new token using credentials
+                                if os.path.exists(creds_file):
+                                    self.log("Attempting to get new token using credentials...", "INFO")
+                                    try:
+                                        flow = InstalledAppFlow.from_client_secrets_file(
+                                            creds_file,
+                                            list(set(self.gmail_scopes + self.drive_scopes + self.sheets_scopes))
+                                        )
+                                        # For non-interactive environment, we need to handle this differently
+                                        # Since we can't do local server in GitHub Actions
+                                        self.log("Cannot perform interactive auth in GitHub Actions", "ERROR")
+                                        return False
+                                    except Exception as flow_error:
+                                        self.log(f"Failed to create auth flow: {str(flow_error)}", "ERROR")
+                                        return False
+                                else:
+                                    self.log("Credentials file not found", "ERROR")
+                                    return False
+                        else:
+                            self.log("Token expired and no refresh token available", "ERROR")
+                            return False
+                    else:
+                        self.log(f"Token is valid until {creds.expiry}", "INFO")
                 except Exception as e:
                     self.log(f"Failed to load token: {str(e)}", "ERROR")
                     return False
-            
-            # If there are no (valid) credentials available
-            if not creds or not creds.valid:
-                if creds and creds.expired and creds.refresh_token:
-                    try:
-                        self.log("Token expired, attempting to refresh...", "INFO")
-                        creds.refresh(Request())
-                        self.log("Token refreshed successfully", "INFO")
-                        
-                        # Save refreshed token back
-                        with open(token_file, 'w') as token:
-                            token.write(creds.to_json())
-                        self.log("Refreshed token saved", "INFO")
-                    except Exception as e:
-                        self.log(f"Failed to refresh token: {str(e)}", "ERROR")
-                        return False
-                else:
-                    self.log("No valid credentials found. Cannot authenticate.", "ERROR")
-                    return False
+            else:
+                self.log("Token file not found", "ERROR")
+                return False
             
             # Build services
             self.gmail_service = build('gmail', 'v1', credentials=creds)
             self.drive_service = build('drive', 'v3', credentials=creds)
             self.sheets_service = build('sheets', 'v4', credentials=creds)
             
-            self.log("Authentication successful!", "INFO")
+            # Test authentication by making a simple API call
+            try:
+                profile = self.gmail_service.users().getProfile(userId='me').execute()
+                self.log(f"Authenticated as: {profile.get('emailAddress', 'Unknown')}", "SUCCESS")
+            except Exception as api_error:
+                self.log(f"Authentication test failed: {str(api_error)}", "ERROR")
+                return False
+            
+            self.log("Authentication successful!", "SUCCESS")
             return True
             
         except Exception as e:
@@ -602,87 +648,99 @@ class BlinkitHOTScheduler:
         return stats
     
     def _send_summary_email(self, summary_data: Dict):
-        """Send summary email with workflow results"""
+        """Send summary email with workflow results - Fixed version"""
         try:
+            self.log("Preparing to send summary email...", "INFO")
+            
             # Get user's email address
             profile = self.gmail_service.users().getProfile(userId='me').execute()
             user_email = profile['emailAddress']
+            self.log(f"Sending email from: {user_email}", "INFO")
             
             # Prepare email content
             subject = f"{self.email_config['subject_prefix']} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
             
-            # Build email body
-            body = f"""
-Blinkit HOT Automation Workflow Summary
-========================================
-Workflow Start: {summary_data['workflow_start'].strftime('%Y-%m-%d %H:%M:%S')}
-Workflow End: {summary_data['workflow_end'].strftime('%Y-%m-%d %H:%M:%S')}
-Days Back Parameter: {self.gmail_config['days_back']} days
-
-MAIL TO DRIVE WORKFLOW:
------------------------
-Number of emails checked: {summary_data['emails_checked']}
-Number of attachments found: {summary_data['attachments_found']}
-Number of attachments skipped (already exist): {summary_data['attachments_skipped']}
-Number of attachments uploaded: {summary_data['attachments_uploaded']}
-Number of attachments failed to upload: {summary_data['attachments_failed']}
-Gmail Workflow Status: {'SUCCESS' if summary_data['gmail_success'] else 'FAILED'}
-
-DRIVE TO SHEET WORKFLOW:
-------------------------
-Number of files found (within {self.excel_config['days_back']} days): {summary_data['total_files_found']}
-Number of files skipped (already in sheet): {summary_data['files_skipped']}
-Number of files processed: {summary_data['files_processed']}
-Number of files failed to process: {summary_data['files_failed']}
-Number of duplicate rows removed: {summary_data['duplicates_removed']}
-Excel Workflow Status: {'SUCCESS' if summary_data['excel_success'] else 'FAILED'}
-
-OVERALL STATUS:
----------------
-Overall Workflow Status: {'SUCCESS' if summary_data['overall_success'] else 'FAILED'}
-Total Duration: {summary_data['duration_minutes']:.2f} minutes
-
-This is an automated email from Blinkit HOT Automation Scheduler.
-            """
+            # Build email body with proper formatting
+            body_lines = [
+                "Blinkit HOT Automation Workflow Summary",
+                "=" * 40,
+                f"Workflow Start: {summary_data['workflow_start'].strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Workflow End: {summary_data['workflow_end'].strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Days Back Parameter: {self.gmail_config['days_back']} days",
+                "",
+                "MAIL TO DRIVE WORKFLOW:",
+                "-" * 20,
+                f"Number of emails checked: {summary_data['emails_checked']}",
+                f"Number of attachments found: {summary_data['attachments_found']}",
+                f"Number of attachments skipped (already exist): {summary_data['attachments_skipped']}",
+                f"Number of attachments uploaded: {summary_data['attachments_uploaded']}",
+                f"Number of attachments failed to upload: {summary_data['attachments_failed']}",
+                f"Gmail Workflow Status: {'SUCCESS' if summary_data['gmail_success'] else 'FAILED'}",
+                "",
+                "DRIVE TO SHEET WORKFLOW:",
+                "-" * 20,
+                f"Number of files found (within {self.excel_config['days_back']} days): {summary_data['total_files_found']}",
+                f"Number of files skipped (already in sheet): {summary_data['files_skipped']}",
+                f"Number of files processed: {summary_data['files_processed']}",
+                f"Number of files failed to process: {summary_data['files_failed']}",
+                f"Number of duplicate rows removed: {summary_data['duplicates_removed']}",
+                f"Excel Workflow Status: {'SUCCESS' if summary_data['excel_success'] else 'FAILED'}",
+                "",
+                "OVERALL STATUS:",
+                "-" * 15,
+                f"Overall Workflow Status: {'SUCCESS' if summary_data['overall_success'] else 'FAILED'}",
+                f"Total Duration: {summary_data['duration_minutes']:.2f} minutes",
+                "",
+                "This is an automated email from Blinkit HOT Automation Scheduler."
+            ]
             
-            # Create email message
-            message = f"From: {user_email}\r\n"
-            message += f"To: {self.email_config['recipient']}\r\n"
-            message += f"Cc: {user_email}\r\n"
-            message += f"Subject: {subject}\r\n\r\n"
+            body = "\n".join(body_lines)
+            
+            # Create email message with proper formatting
+            message = f"Subject: {subject}\n"
+            message += f"To: {self.email_config['recipient']}\n"
+            message += f"From: {user_email}\n"
+            message += f"Cc: {user_email}\n"
+            message += "Content-Type: text/plain; charset=\"UTF-8\"\n\n"
             message += body
             
             # Encode message
             raw_message = base64.urlsafe_b64encode(message.encode('utf-8')).decode('utf-8')
             
             # Send email
-            self.gmail_service.users().messages().send(
+            send_result = self.gmail_service.users().messages().send(
                 userId='me',
                 body={'raw': raw_message}
             ).execute()
             
-            self.log(f"Summary email sent to {self.email_config['recipient']} and {user_email}", "SUCCESS")
+            self.log(f"Summary email sent to {self.email_config['recipient']} and CC'd to {user_email}", "SUCCESS")
+            self.log(f"Email message ID: {send_result.get('id', 'Unknown')}", "INFO")
             
         except Exception as e:
             self.log(f"Failed to send summary email: {str(e)}", "ERROR")
+            # Don't raise the exception, just log it
     
     def run_complete_workflow(self):
         """Run complete workflow: Gmail → Excel with Source File Tracking → Log Summary → Send Email"""
-        self.log("=== Starting Complete Blinkit HOT Workflow with Source File Tracking ===", "INFO")
+        self.log("=" * 70, "INFO")
+        self.log("Starting Complete Blinkit HOT Workflow with Source File Tracking", "INFO")
+        self.log("=" * 70, "INFO")
         self.log(f"Current working directory: {os.getcwd()}", "INFO")
         self.log(f"Files in directory: {os.listdir('.')}", "INFO")
         
         # Authenticate first
         if not self.authenticate():
             self.log("Authentication failed! Cannot run workflow.", "ERROR")
-            return
+            return False
         
         overall_start = datetime.now()
         
         # Step 1: Run Gmail workflow
+        self.log("--- Step 1: Gmail to Drive Workflow ---", "INFO")
         gmail_result = self.process_gmail_workflow()
         
         # Step 2: Run Excel workflow with source file tracking
+        self.log("--- Step 2: Drive to Sheet Workflow ---", "INFO")
         excel_result = self.process_excel_workflow()
         
         overall_end = datetime.now()
@@ -709,20 +767,26 @@ This is an automated email from Blinkit HOT Automation Scheduler.
         }
         
         # Step 4: Log summary to sheet
+        self.log("--- Step 3: Logging Summary to Google Sheet ---", "INFO")
         self._log_summary_to_sheet(summary_data)
         
         # Step 5: Send summary email
+        self.log("--- Step 4: Sending Summary Email ---", "INFO")
         self._send_summary_email(summary_data)
         
         # Log final summary to console
-        self.log(f"=== Complete Workflow Finished ===", "INFO")
+        self.log("=" * 70, "INFO")
+        self.log("Complete Workflow Finished", "SUCCESS")
         self.log(f"Duration: {duration:.2f} minutes", "INFO")
         self.log(f"Emails checked: {summary_data['emails_checked']}", "INFO")
         self.log(f"Attachments uploaded: {summary_data['attachments_uploaded']}", "INFO")
         self.log(f"Total Excel files found: {summary_data['total_files_found']}", "INFO")
         self.log(f"New files processed: {summary_data['files_processed']}", "INFO")
         self.log(f"Duplicates removed: {summary_data['duplicates_removed']}", "INFO")
-        self.log(f"Overall success: {summary_data['overall_success']}", "INFO")
+        self.log(f"Overall success: {summary_data['overall_success']}", "SUCCESS")
+        self.log("=" * 70, "INFO")
+        
+        return summary_data['overall_success']
     
     # Helper methods
     def _append_to_sheet_with_source(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, 
@@ -1121,9 +1185,11 @@ This is an automated email from Blinkit HOT Automation Scheduler.
 def run_once():
     """Run the workflow once (for GitHub Actions)"""
     automation = BlinkitHOTScheduler()
-    automation.run_complete_workflow()
+    return automation.run_complete_workflow()
 
 
 if __name__ == "__main__":
     # For GitHub Actions - always run once
-    run_once()
+    success = run_once()
+    exit_code = 0 if success else 1
+    exit(exit_code)
