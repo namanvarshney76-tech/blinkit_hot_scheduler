@@ -75,7 +75,7 @@ class BlinkitHOTScheduler:
             'days_back': 7,
             'max_results': 1000,
             'source_file_column': 'source_file_name',  # New column name for source tracking
-            'item_code_column': 'Item_Code',  # Column name for Item_Code
+            'item_code_column': 'Item Code',  # Column name for Item_Code (exact name from your image)
             'po_number_column': 'po_number'   # Column name for PO Number
         }
         
@@ -444,8 +444,8 @@ class BlinkitHOTScheduler:
                         self.log(f"No data extracted from: {file['name']}", "WARNING")
                         continue
                     
-                    # Ensure Item_Code and po_number are treated as strings
-                    df = self._ensure_string_columns(df)
+                    # Ensure all data is converted to strings to prevent numeric formatting issues
+                    df = self._ensure_all_columns_string(df)
                     
                     # Add source file column to DataFrame
                     df[self.excel_config['source_file_column']] = file['name']
@@ -475,12 +475,11 @@ class BlinkitHOTScheduler:
                     excel_summary['files_failed'] += 1
                     self.log(f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}", "ERROR")
             
-            # Step 5: Remove duplicates from the entire sheet based on Item_Code and po_number mapping
+            # Step 5: Remove duplicates from the entire sheet based on PO number only
             if excel_summary['files_processed'] > 0:
-                duplicates_removed = self._remove_duplicates_by_item_po_mapping(
+                duplicates_removed = self._remove_duplicates_by_po_number(
                     self.excel_config['spreadsheet_id'],
                     self.excel_config['sheet_name'],
-                    self.excel_config['item_code_column'],
                     self.excel_config['po_number_column']
                 )
                 excel_summary['duplicates_removed'] = duplicates_removed
@@ -506,32 +505,42 @@ class BlinkitHOTScheduler:
                 'end_time': datetime.now()
             }
     
-    def _ensure_string_columns(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure Item_Code and po_number columns are treated as strings"""
+    def _ensure_all_columns_string(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Convert ALL DataFrame columns to string type to prevent numeric formatting issues"""
         try:
-            item_code_col = self.excel_config['item_code_column']
-            po_number_col = self.excel_config['po_number_column']
+            # Store original dtypes for logging
+            original_dtypes = df.dtypes.to_dict()
             
-            if item_code_col in df.columns:
-                # Convert Item_Code to string and remove any decimal points for integer values
-                df[item_code_col] = df[item_code_col].astype(str).str.replace(r'\.0$', '', regex=True)
-                self.log(f"Converted {item_code_col} to string type", "INFO")
+            # Convert ALL columns to string
+            df = df.astype(str)
             
-            if po_number_col in df.columns:
-                # Convert po_number to string and remove any decimal points for integer values
-                df[po_number_col] = df[po_number_col].astype(str).str.replace(r'\.0$', '', regex=True)
-                self.log(f"Converted {po_number_col} to string type", "INFO")
+            # Clean up .0 for numeric-looking strings
+            for col in df.columns:
+                # Remove trailing .0 for any column that looks like it might be numeric
+                df[col] = df[col].str.replace(r'\.0$', '', regex=True)
+                # Also handle scientific notation
+                df[col] = df[col].str.replace(r'\.0+e', 'e', regex=True)
+            
+            self.log(f"Converted all columns to string type", "INFO")
+            
+            # Log a sample of converted data
+            if not df.empty:
+                sample_item_codes = df.get(self.excel_config['item_code_column'], pd.Series([])).head(3).tolist()
+                sample_po_numbers = df.get(self.excel_config['po_number_column'], pd.Series([])).head(3).tolist()
+                if sample_item_codes:
+                    self.log(f"Sample Item Codes (as strings): {sample_item_codes}", "INFO")
+                if sample_po_numbers:
+                    self.log(f"Sample PO Numbers (as strings): {sample_po_numbers}", "INFO")
             
             return df
         except Exception as e:
             self.log(f"Error converting columns to string: {str(e)}", "WARNING")
             return df
     
-    def _remove_duplicates_by_item_po_mapping(self, spreadsheet_id: str, sheet_name: str, 
-                                            item_code_column: str, po_number_column: str) -> int:
-        """Remove duplicates based on Item_Code and po_number mapping"""
+    def _remove_duplicates_by_po_number(self, spreadsheet_id: str, sheet_name: str, po_number_column: str) -> int:
+        """Remove duplicates based on PO number only (keep first occurrence of each PO)"""
         try:
-            self.log(f"Removing duplicates based on {item_code_column} and {po_number_column} mapping...", "INFO")
+            self.log(f"Removing duplicates based on {po_number_column} only...", "INFO")
             
             # Get all data from the sheet
             result = self.sheets_service.spreadsheets().values().get(
@@ -555,25 +564,29 @@ class BlinkitHOTScheduler:
             # Store original count
             original_count = len(df)
             
-            # Check if required columns exist
-            if item_code_column not in df.columns or po_number_column not in df.columns:
-                self.log(f"Cannot remove duplicates: {item_code_column} or {po_number_column} column not found", "WARNING")
+            # Check if PO number column exists
+            if po_number_column not in df.columns:
+                self.log(f"Cannot remove duplicates: {po_number_column} column not found", "WARNING")
                 return 0
             
-            # Ensure columns are treated as strings
-            df[item_code_column] = df[item_code_column].astype(str).str.strip()
+            # Ensure PO number column is treated as string
             df[po_number_column] = df[po_number_column].astype(str).str.strip()
             
-            # Remove duplicates based on Item_Code and po_number mapping
-            # For one PO number, there should be only one Item_Code
-            # We'll keep the first occurrence for each PO number
+            # Remove duplicates based on PO number only (keep first occurrence)
             df_cleaned = df.drop_duplicates(subset=[po_number_column], keep='first')
             
             # Count duplicates removed
             duplicates_removed = original_count - len(df_cleaned)
             
             if duplicates_removed > 0:
-                self.log(f"Removing {duplicates_removed} duplicate rows based on {item_code_column} and {po_number_column} mapping", "INFO")
+                self.log(f"Removing {duplicates_removed} duplicate rows based on {po_number_column}", "INFO")
+                self.log(f"Before: {original_count} rows, After: {len(df_cleaned)} rows", "INFO")
+                
+                # Find which PO numbers had duplicates
+                duplicate_counts = df[po_number_column].value_counts()
+                duplicate_po_numbers = duplicate_counts[duplicate_counts > 1].index.tolist()
+                if duplicate_po_numbers:
+                    self.log(f"PO numbers with duplicates: {duplicate_po_numbers[:10]}{'...' if len(duplicate_po_numbers) > 10 else ''}", "INFO")
                 
                 # Prepare data for update
                 all_values = [headers] + df_cleaned.fillna('').astype(str).values.tolist()
@@ -593,14 +606,14 @@ class BlinkitHOTScheduler:
                     body=body
                 ).execute()
                 
-                self.log(f"Successfully removed {duplicates_removed} duplicate rows based on {item_code_column} and {po_number_column} mapping", "SUCCESS")
+                self.log(f"Successfully removed {duplicates_removed} duplicate rows based on {po_number_column}", "SUCCESS")
             else:
-                self.log("No duplicates found based on Item_Code and po_number mapping", "INFO")
+                self.log("No duplicates found based on PO number", "INFO")
             
             return duplicates_removed
             
         except Exception as e:
-            self.log(f"Failed to remove duplicates by item-po mapping: {str(e)}", "ERROR")
+            self.log(f"Failed to remove duplicates by PO number: {str(e)}", "ERROR")
             return 0
     
     def _extract_attachments_from_email_detailed(self, message_id: str, payload: Dict, sender: str, config: dict, base_folder_id: str) -> Dict[str, int]:
@@ -1202,13 +1215,11 @@ class BlinkitHOTScheduler:
             df = df[mask]
             self.log(f"After removing blank B column rows: {df.shape}", "INFO")
         
-        # Remove duplicate rows based on Item_Code and po_number if they exist
-        item_code_col = self.excel_config['item_code_column']
+        # Remove duplicate rows based on PO number only (if it exists)
         po_number_col = self.excel_config['po_number_column']
         
-        if item_code_col in df.columns and po_number_col in df.columns:
-            # Ensure they're strings for proper comparison
-            df[item_code_col] = df[item_code_col].astype(str).str.strip()
+        if po_number_col in df.columns:
+            # Ensure it's string for proper comparison
             df[po_number_col] = df[po_number_col].astype(str).str.strip()
             
             original_count = len(df)
@@ -1216,9 +1227,9 @@ class BlinkitHOTScheduler:
             duplicates_removed = original_count - len(df)
             
             if duplicates_removed > 0:
-                self.log(f"Removed {duplicates_removed} duplicate rows based on {po_number_col} mapping", "INFO")
+                self.log(f"Removed {duplicates_removed} duplicate rows based on {po_number_col} (keeping first occurrence for each PO)", "INFO")
         else:
-            # Fall back to all columns if specific columns don't exist
+            # Fall back to all columns if PO column doesn't exist
             original_count = len(df)
             df = df.drop_duplicates()
             duplicates_removed = original_count - len(df)
