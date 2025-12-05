@@ -70,11 +70,13 @@ class BlinkitHOTScheduler:
         self.excel_config = {
             'excel_folder_id': '1KM0UGCN4_Z3XLD7nZTMpyM_bKVcsBCOZ',
             'spreadsheet_id': '10wyfALowemBcEFiZP9Tyy08npl_44FpHonO3rKARmRY',
-            'sheet_name': 'hotgrn',
+            'sheet_name': 'test',
             'header_row': 0,
             'days_back': 7,
             'max_results': 1000,
-            'source_file_column': 'source_file_name'  # New column name for source tracking
+            'source_file_column': 'source_file_name',
+            'item_code_column': 'Item Code',  # Column name for Item_Code
+            'po_number_column': 'po_number'   # Column name for PO Number
         }
         
         # Summary sheet configuration
@@ -442,6 +444,9 @@ class BlinkitHOTScheduler:
                         self.log(f"No data extracted from: {file['name']}", "WARNING")
                         continue
                     
+                    # Clean and prepare data
+                    df = self._prepare_data_for_sheet(df)
+                    
                     # Add source file column to DataFrame
                     df[self.excel_config['source_file_column']] = file['name']
                     
@@ -470,12 +475,13 @@ class BlinkitHOTScheduler:
                     excel_summary['files_failed'] += 1
                     self.log(f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}", "ERROR")
             
-            # Step 5: Remove duplicates from the entire sheet
+            # Step 5: Remove duplicates from the entire sheet based on PO number and Item Code combination
             if excel_summary['files_processed'] > 0:
-                duplicates_removed = self._remove_duplicates_from_sheet(
+                duplicates_removed = self._remove_duplicates_by_po_and_item(
                     self.excel_config['spreadsheet_id'],
                     self.excel_config['sheet_name'],
-                    self.excel_config['source_file_column']
+                    self.excel_config['po_number_column'],
+                    self.excel_config['item_code_column']
                 )
                 excel_summary['duplicates_removed'] = duplicates_removed
             
@@ -500,10 +506,33 @@ class BlinkitHOTScheduler:
                 'end_time': datetime.now()
             }
     
-    def _remove_duplicates_from_sheet(self, spreadsheet_id: str, sheet_name: str, source_file_column: str) -> int:
-        """Remove duplicates from the entire Google Sheet"""
+    def _prepare_data_for_sheet(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare DataFrame for Google Sheets by ensuring Item Code and PO Number are plain text"""
         try:
-            self.log(f"Removing duplicates from sheet: {sheet_name}", "INFO")
+            item_code_col = self.excel_config['item_code_column']
+            po_number_col = self.excel_config['po_number_column']
+            
+            # Ensure these columns exist
+            if item_code_col in df.columns:
+                # Convert to string and add apostrophe to force plain text in Google Sheets
+                df[item_code_col] = "'" + df[item_code_col].astype(str).str.strip()
+                self.log(f"Prepared {item_code_col} as plain text", "INFO")
+            
+            if po_number_col in df.columns:
+                # Convert to string and add apostrophe to force plain text in Google Sheets
+                df[po_number_col] = "'" + df[po_number_col].astype(str).str.strip()
+                self.log(f"Prepared {po_number_col} as plain text", "INFO")
+            
+            return df
+        except Exception as e:
+            self.log(f"Error preparing data for sheet: {str(e)}", "WARNING")
+            return df
+    
+    def _remove_duplicates_by_po_and_item(self, spreadsheet_id: str, sheet_name: str, 
+                                         po_number_column: str, item_code_column: str) -> int:
+        """Remove duplicates based on PO number AND Item Code combination"""
+        try:
+            self.log(f"Removing duplicates based on {po_number_column} AND {item_code_column} combination...", "INFO")
             
             # Get all data from the sheet
             result = self.sheets_service.spreadsheets().values().get(
@@ -517,16 +546,9 @@ class BlinkitHOTScheduler:
                 self.log("No data found in sheet to remove duplicates", "INFO")
                 return 0
             
-            # Convert to DataFrame for duplicate removal
+            # Convert to DataFrame
             headers = values[0]
             data = values[1:]
-            
-            # Find source file column index
-            try:
-                source_col_index = headers.index(source_file_column)
-            except ValueError:
-                self.log(f"Source file column '{source_file_column}' not found in sheet", "WARNING")
-                source_col_index = -1
             
             # Create DataFrame
             df = pd.DataFrame(data, columns=headers)
@@ -534,17 +556,45 @@ class BlinkitHOTScheduler:
             # Store original count
             original_count = len(df)
             
-            # Remove duplicates (keeping the first occurrence)
-            df = df.drop_duplicates()
+            # Check if required columns exist
+            if po_number_column not in df.columns:
+                self.log(f"Cannot remove duplicates: {po_number_column} column not found", "WARNING")
+                return 0
+            
+            if item_code_column not in df.columns:
+                self.log(f"Cannot remove duplicates: {item_code_column} column not found", "WARNING")
+                return 0
+            
+            # Ensure columns are treated as strings (strip apostrophe if present for comparison)
+            df[po_number_column] = df[po_number_column].astype(str).str.strip()
+            df[item_code_column] = df[item_code_column].astype(str).str.strip()
+            
+            # Remove apostrophe prefix for comparison (if present)
+            df[po_number_column] = df[po_number_column].str.replace("^'", "", regex=True)
+            df[item_code_column] = df[item_code_column].str.replace("^'", "", regex=True)
+            
+            # Remove duplicates based on PO number AND Item Code combination
+            # Keep first occurrence of each unique (PO, Item) pair
+            df_cleaned = df.drop_duplicates(subset=[po_number_column, item_code_column], keep='first')
             
             # Count duplicates removed
-            duplicates_removed = original_count - len(df)
+            duplicates_removed = original_count - len(df_cleaned)
             
             if duplicates_removed > 0:
-                self.log(f"Removing {duplicates_removed} duplicate rows from sheet", "INFO")
+                self.log(f"Removing {duplicates_removed} duplicate rows based on {po_number_column} AND {item_code_column}", "INFO")
+                
+                # Find duplicate combinations
+                duplicate_combinations = df[df.duplicated(subset=[po_number_column, item_code_column], keep=False)]
+                if len(duplicate_combinations) > 0:
+                    sample_duplicates = duplicate_combinations[[po_number_column, item_code_column]].head(5)
+                    self.log(f"Sample duplicates: {sample_duplicates.values.tolist()}", "INFO")
+                
+                # Add apostrophe back for plain text in Google Sheets
+                df_cleaned[po_number_column] = "'" + df_cleaned[po_number_column].astype(str).str.strip()
+                df_cleaned[item_code_column] = "'" + df_cleaned[item_code_column].astype(str).str.strip()
                 
                 # Prepare data for update
-                all_values = [headers] + df.fillna('').astype(str).values.tolist()
+                all_values = [headers] + df_cleaned.fillna('').astype(str).values.tolist()
                 
                 # Clear the entire sheet
                 self.sheets_service.spreadsheets().values().clear(
@@ -557,18 +607,18 @@ class BlinkitHOTScheduler:
                 self.sheets_service.spreadsheets().values().update(
                     spreadsheetId=spreadsheet_id,
                     range=f"{sheet_name}!A1",
-                    valueInputOption='USER_ENTERED',
+                    valueInputOption='RAW',  # Use RAW to preserve plain text
                     body=body
                 ).execute()
                 
-                self.log(f"Successfully removed {duplicates_removed} duplicate rows", "SUCCESS")
+                self.log(f"Successfully removed {duplicates_removed} duplicate rows based on {po_number_column} AND {item_code_column}", "SUCCESS")
             else:
-                self.log("No duplicates found in sheet", "INFO")
+                self.log("No duplicates found based on PO number AND Item Code combination", "INFO")
             
             return duplicates_removed
             
         except Exception as e:
-            self.log(f"Failed to remove duplicates from sheet: {str(e)}", "ERROR")
+            self.log(f"Failed to remove duplicates by PO and Item: {str(e)}", "ERROR")
             return 0
     
     def _extract_attachments_from_email_detailed(self, message_id: str, payload: Dict, sender: str, config: dict, base_folder_id: str) -> Dict[str, int]:
@@ -791,7 +841,7 @@ class BlinkitHOTScheduler:
     # Helper methods
     def _append_to_sheet_with_source(self, spreadsheet_id: str, sheet_name: str, df: pd.DataFrame, 
                                     source_file_column: str, include_headers: bool):
-        """Append DataFrame to Google Sheet with source file column"""
+        """Append DataFrame to Google Sheet with source file column - using RAW to preserve text"""
         try:
             # Make sure source file column is the last column
             columns = [col for col in df.columns if col != source_file_column] + [source_file_column]
@@ -814,11 +864,11 @@ class BlinkitHOTScheduler:
                 'values': values
             }
             
-            # Append data to the sheet
+            # Append data to the sheet - Use RAW to preserve plain text
             result = self.sheets_service.spreadsheets().values().append(
                 spreadsheetId=spreadsheet_id,
                 range=f"{sheet_name}!A:A",
-                valueInputOption='USER_ENTERED',
+                valueInputOption='RAW',  # Changed to RAW to preserve text formatting
                 insertDataOption='INSERT_ROWS',
                 body=body
             ).execute()
@@ -873,7 +923,7 @@ class BlinkitHOTScheduler:
                     self.sheets_service.spreadsheets().values().update(
                         spreadsheetId=self.summary_config['spreadsheet_id'],
                         range=f"{self.summary_config['sheet_name']}!A1",
-                        valueInputOption='USER_ENTERED',
+                        valueInputOption='RAW',
                         body=body
                     ).execute()
                 else:
@@ -882,7 +932,7 @@ class BlinkitHOTScheduler:
                     self.sheets_service.spreadsheets().values().append(
                         spreadsheetId=self.summary_config['spreadsheet_id'],
                         range=f"{self.summary_config['sheet_name']}!A:A",
-                        valueInputOption='USER_ENTERED',
+                        valueInputOption='RAW',
                         insertDataOption='INSERT_ROWS',
                         body=body
                     ).execute()
@@ -905,7 +955,7 @@ class BlinkitHOTScheduler:
                     self.sheets_service.spreadsheets().values().update(
                         spreadsheetId=self.summary_config['spreadsheet_id'],
                         range=f"{self.summary_config['sheet_name']}!A1",
-                        valueInputOption='USER_ENTERED',
+                        valueInputOption='RAW',
                         body=body
                     ).execute()
                     self.log("Created summary sheet and logged workflow data", "INFO")
@@ -1170,13 +1220,29 @@ class BlinkitHOTScheduler:
             df = df[mask]
             self.log(f"After removing blank B column rows: {df.shape}", "INFO")
         
-        # Remove duplicate rows
-        original_count = len(df)
-        df = df.drop_duplicates()
-        duplicates_removed = original_count - len(df)
+        # Remove duplicate rows based on PO number AND Item Code (if they exist)
+        po_number_col = self.excel_config['po_number_column']
+        item_code_col = self.excel_config['item_code_column']
         
-        if duplicates_removed > 0:
-            self.log(f"Removed {duplicates_removed} duplicate rows", "INFO")
+        if po_number_col in df.columns and item_code_col in df.columns:
+            # Ensure they're strings for proper comparison
+            df[po_number_col] = df[po_number_col].astype(str).str.strip()
+            df[item_code_col] = df[item_code_col].astype(str).str.strip()
+            
+            original_count = len(df)
+            df = df.drop_duplicates(subset=[po_number_col, item_code_col], keep='first')
+            duplicates_removed = original_count - len(df)
+            
+            if duplicates_removed > 0:
+                self.log(f"Removed {duplicates_removed} duplicate rows based on {po_number_col} AND {item_code_col}", "INFO")
+        else:
+            # Fall back to all columns if required columns don't exist
+            original_count = len(df)
+            df = df.drop_duplicates()
+            duplicates_removed = original_count - len(df)
+            
+            if duplicates_removed > 0:
+                self.log(f"Removed {duplicates_removed} duplicate rows", "INFO")
         
         self.log(f"Final cleaned DataFrame shape: {df.shape}", "INFO")
         return df
@@ -1193,6 +1259,3 @@ if __name__ == "__main__":
     success = run_once()
     exit_code = 0 if success else 1
     exit(exit_code)
-
-
-
