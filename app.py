@@ -75,7 +75,7 @@ class BlinkitHOTScheduler:
             'days_back': 7,
             'max_results': 1000,
             'source_file_column': 'source_file_name',
-            'item_code_column': 'Item Code',  # Column name for Item_Code
+            'item_code_column': 'Item_Code',  # Column name for Item_Code
             'po_number_column': 'po_number'   # Column name for PO Number
         }
         
@@ -444,8 +444,8 @@ class BlinkitHOTScheduler:
                         self.log(f"No data extracted from: {file['name']}", "WARNING")
                         continue
                     
-                    # Clean and prepare data
-                    df = self._prepare_data_for_sheet(df)
+                    # Ensure Item Code and PO Number are strings (but don't add apostrophe)
+                    df = self._ensure_numeric_columns_as_strings(df)
                     
                     # Add source file column to DataFrame
                     df[self.excel_config['source_file_column']] = file['name']
@@ -475,7 +475,7 @@ class BlinkitHOTScheduler:
                     excel_summary['files_failed'] += 1
                     self.log(f"Failed to process Excel file {file.get('name', 'unknown')}: {str(e)}", "ERROR")
             
-            # Step 5: Remove duplicates from the entire sheet based on PO number and Item Code combination
+            # Step 5: Remove duplicates from the entire sheet based on PO number AND Item Code combination
             if excel_summary['files_processed'] > 0:
                 duplicates_removed = self._remove_duplicates_by_po_and_item(
                     self.excel_config['spreadsheet_id'],
@@ -506,26 +506,30 @@ class BlinkitHOTScheduler:
                 'end_time': datetime.now()
             }
     
-    def _prepare_data_for_sheet(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Prepare DataFrame for Google Sheets by ensuring Item Code and PO Number are plain text"""
+    def _ensure_numeric_columns_as_strings(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Ensure numeric columns are converted to strings without modifying the data"""
         try:
             item_code_col = self.excel_config['item_code_column']
             po_number_col = self.excel_config['po_number_column']
             
-            # Ensure these columns exist
+            # Convert specific columns to string if they're numeric
             if item_code_col in df.columns:
-                # Convert to string and add apostrophe to force plain text in Google Sheets
-                df[item_code_col] = "'" + df[item_code_col].astype(str).str.strip()
-                self.log(f"Prepared {item_code_col} as plain text", "INFO")
+                if pd.api.types.is_numeric_dtype(df[item_code_col]):
+                    df[item_code_col] = df[item_code_col].astype(str)
+                    # Remove .0 from integer values converted to float
+                    df[item_code_col] = df[item_code_col].str.replace(r'\.0$', '', regex=True)
+                    self.log(f"Converted {item_code_col} from numeric to string", "INFO")
             
             if po_number_col in df.columns:
-                # Convert to string and add apostrophe to force plain text in Google Sheets
-                df[po_number_col] = "'" + df[po_number_col].astype(str).str.strip()
-                self.log(f"Prepared {po_number_col} as plain text", "INFO")
+                if pd.api.types.is_numeric_dtype(df[po_number_col]):
+                    df[po_number_col] = df[po_number_col].astype(str)
+                    # Remove .0 from integer values converted to float
+                    df[po_number_col] = df[po_number_col].str.replace(r'\.0$', '', regex=True)
+                    self.log(f"Converted {po_number_col} from numeric to string", "INFO")
             
             return df
         except Exception as e:
-            self.log(f"Error preparing data for sheet: {str(e)}", "WARNING")
+            self.log(f"Error converting numeric columns to strings: {str(e)}", "WARNING")
             return df
     
     def _remove_duplicates_by_po_and_item(self, spreadsheet_id: str, sheet_name: str, 
@@ -565,13 +569,13 @@ class BlinkitHOTScheduler:
                 self.log(f"Cannot remove duplicates: {item_code_column} column not found", "WARNING")
                 return 0
             
-            # Ensure columns are treated as strings (strip apostrophe if present for comparison)
+            # Ensure columns are treated as strings
             df[po_number_column] = df[po_number_column].astype(str).str.strip()
             df[item_code_column] = df[item_code_column].astype(str).str.strip()
             
-            # Remove apostrophe prefix for comparison (if present)
-            df[po_number_column] = df[po_number_column].str.replace("^'", "", regex=True)
-            df[item_code_column] = df[item_code_column].str.replace("^'", "", regex=True)
+            # Remove .0 from values that might have been converted from float
+            df[po_number_column] = df[po_number_column].str.replace(r'\.0$', '', regex=True)
+            df[item_code_column] = df[item_code_column].str.replace(r'\.0$', '', regex=True)
             
             # Remove duplicates based on PO number AND Item Code combination
             # Keep first occurrence of each unique (PO, Item) pair
@@ -587,11 +591,7 @@ class BlinkitHOTScheduler:
                 duplicate_combinations = df[df.duplicated(subset=[po_number_column, item_code_column], keep=False)]
                 if len(duplicate_combinations) > 0:
                     sample_duplicates = duplicate_combinations[[po_number_column, item_code_column]].head(5)
-                    self.log(f"Sample duplicates: {sample_duplicates.values.tolist()}", "INFO")
-                
-                # Add apostrophe back for plain text in Google Sheets
-                df_cleaned[po_number_column] = "'" + df_cleaned[po_number_column].astype(str).str.strip()
-                df_cleaned[item_code_column] = "'" + df_cleaned[item_code_column].astype(str).str.strip()
+                    self.log(f"Sample duplicate combinations: {sample_duplicates.values.tolist()}", "INFO")
                 
                 # Prepare data for update
                 all_values = [headers] + df_cleaned.fillna('').astype(str).values.tolist()
@@ -868,7 +868,7 @@ class BlinkitHOTScheduler:
             result = self.sheets_service.spreadsheets().values().append(
                 spreadsheetId=spreadsheet_id,
                 range=f"{sheet_name}!A:A",
-                valueInputOption='RAW',  # Changed to RAW to preserve text formatting
+                valueInputOption='RAW',  # Use RAW to preserve text
                 insertDataOption='INSERT_ROWS',
                 body=body
             ).execute()
@@ -1228,6 +1228,10 @@ class BlinkitHOTScheduler:
             # Ensure they're strings for proper comparison
             df[po_number_col] = df[po_number_col].astype(str).str.strip()
             df[item_code_col] = df[item_code_col].astype(str).str.strip()
+            
+            # Remove .0 from integer values converted from float
+            df[po_number_col] = df[po_number_col].str.replace(r'\.0$', '', regex=True)
+            df[item_code_col] = df[item_code_col].str.replace(r'\.0$', '', regex=True)
             
             original_count = len(df)
             df = df.drop_duplicates(subset=[po_number_col, item_code_col], keep='first')
