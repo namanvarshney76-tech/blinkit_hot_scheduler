@@ -62,8 +62,8 @@ class BlinkitHOTScheduler:
         self.gmail_config = {
             'sender': 'purchaseorder@handsontrades.com',
             'search_term': 'GRN and reconciliation ',
-            'days_back': 120,
-            'max_results': 1,
+            'days_back': 7,
+            'max_results': 1000,
             'gdrive_folder_id': '1pZnVxyPRJWaoYldxvWyXLFxQHbdckZfP'
         }
         
@@ -72,7 +72,7 @@ class BlinkitHOTScheduler:
             'spreadsheet_id': '10wyfALowemBcEFiZP9Tyy08npl_44FpHonO3rKARmRY',
             'sheet_name': 'hotgrn',
             'header_row': 0,
-            'days_back': 120,
+            'days_back': 7,
             'max_results': 1000,
             'source_file_column': 'source_file_name'  # New column name for source tracking
         }
@@ -1193,5 +1193,6 @@ if __name__ == "__main__":
     success = run_once()
     exit_code = 0 if success else 1
     exit(exit_code)
+
 
 
